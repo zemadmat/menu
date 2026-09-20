@@ -153,6 +153,8 @@
   }
   .chip:hover{ transform:translateY(-2px) rotate(-1deg); box-shadow:3px 3px 0 var(--cat); }
   .chip.choisi{ background:var(--cat-clair); border-color:var(--cat); transform:scale(.96); }
+  .chip.recent{ opacity:.5; border-style:dashed; }
+  .chip.recent:hover{ opacity:1; }
 
   footer{ position:relative; z-index:1; text-align:center; padding:2.6rem 1rem 3rem; }
   footer p{ font-weight:700; }
@@ -232,14 +234,14 @@
 
     <!-- Vos listes -->
     <section class="listes">
-      <h2>Dans nos listes <small>— cliquez sur un ingrédient pour l’imposer</small></h2>
+      <h2>Dans nos listes <small>— cliquez sur un ingrédient pour l’imposer ; ceux en pointillés viennent d’être proposés</small></h2>
       <div id="groupes"></div>
     </section>
   </main>
 
   <footer>
     <p>✦ Bon appétit ! ✦</p>
-    <p class="note">Les listes se personnalisent dans le code, section <code>LISTES</code>.</p>
+    <p class="note">Les listes et le nombre d’éléments écartés (<code>MEMOIRE</code>) se personnalisent dans le code, section <code>LISTES</code>.</p>
   </footer>
 
 <script>
@@ -257,16 +259,69 @@ const CATEGORIES = [
   { id:"feculents", label:"Féculents", emoji:"🍚" },
   { id:"legumes",   label:"Légumes",   emoji:"🥦" }
 ];
+
+/* Nombre de derniers éléments proposés qui ne reviennent pas, dans chaque liste */
+const MEMOIRE = 5;
+
 /* ═══════════════ fin de la zone à modifier ═══════════════ */
 
 const REDUIT = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const carte  = document.getElementById("carte");
 let idee = {}, compteur = 0, enCours = false;
 
-function piocher(liste, eviter){
-  const possibles = liste.filter(x => x !== eviter);
+/* ---- historique : derniers éléments proposés par catégorie (conservé entre les visites) ---- */
+const CLE_HISTO = "menu-historique";
+
+function chargeHistorique(){
+  let brut = {};
+  try { brut = JSON.parse(localStorage.getItem(CLE_HISTO)) || {}; } catch(e){}
+  const h = {};
+  CATEGORIES.forEach(c => {
+    const lu = Array.isArray(brut[c.id]) ? brut[c.id] : [];
+    h[c.id] = lu.filter(x => LISTES[c.id].includes(x)).slice(-MEMOIRE);   // ignore ce qui n'est plus dans la liste
+  });
+  return h;
+}
+
+let historique = chargeHistorique();
+
+function sauveHistorique(){
+  try { localStorage.setItem(CLE_HISTO, JSON.stringify(historique)); } catch(e){}
+}
+
+/* éléments écartés du prochain tirage (il reste toujours au moins 1 choix, même avec une liste courte) */
+function exclusions(id){
+  const n = Math.min(MEMOIRE, LISTES[id].length - 1);
+  return n > 0 ? historique[id].slice(-n) : [];
+}
+
+function retenir(id, valeur){
+  const h = historique[id].filter(x => x !== valeur);
+  h.push(valeur);
+  historique[id] = h.slice(-MEMOIRE);
+  sauveHistorique();
+  majRecents();
+}
+
+function piocher(liste, exclus = []){
+  const possibles = liste.filter(x => !exclus.includes(x));
   const source = possibles.length ? possibles : liste;
   return source[Math.floor(Math.random() * source.length)];
+}
+
+/* tirage réel d'une catégorie : on écarte les derniers éléments déjà proposés */
+function tirer(id){
+  return piocher(LISTES[id], exclusions(id));
+}
+
+/* estompe, dans les listes, les ingrédients proposés récemment */
+function majRecents(){
+  document.querySelectorAll(".chip").forEach(b => {
+    const recent = exclusions(b.dataset.cat).includes(b.textContent);
+    b.classList.toggle("recent", recent);
+    if (recent) b.title = "Proposé récemment : il ne sera pas tiré au hasard pour l'instant";
+    else b.removeAttribute("title");
+  });
 }
 
 /* ---- construction des 3 lignes de la carte ---- */
@@ -300,7 +355,7 @@ function animeSlot(id, finale, duree){
   return new Promise(resoudre => {
     if (REDUIT){ valEl.textContent = finale; resoudre(); return; }
     valEl.classList.add("spinning"); btn.classList.add("tourne");
-    const tic = setInterval(() => { valEl.textContent = piocher(liste, valEl.textContent); }, 70);
+    const tic = setInterval(() => { valEl.textContent = piocher(liste, [valEl.textContent]); }, 70);
     setTimeout(() => {
       clearInterval(tic);
       valEl.textContent = finale;
@@ -317,9 +372,10 @@ async function nouvelleIdee(){
   if (enCours) return;
   enCours = true; compteur++;
   const cible = {};
-  CATEGORIES.forEach(c => { cible[c.id] = piocher(LISTES[c.id], idee[c.id]); });
+  CATEGORIES.forEach(c => { cible[c.id] = tirer(c.id); });
   await Promise.all(CATEGORIES.map((c, i) => animeSlot(c.id, cible[c.id], REDUIT ? 0 : 520 + i * 170)));
   idee = cible;
+  CATEGORIES.forEach(c => retenir(c.id, cible[c.id]));
   document.getElementById("compteur").textContent = `idée nº ${compteur}`;
   document.getElementById("annonce").textContent =
     "Nouvelle idée : " + CATEGORIES.map(c => idee[c.id]).join(", ");
@@ -330,9 +386,10 @@ async function nouvelleIdee(){
 async function relancer(id){
   if (enCours) return;
   enCours = true;
-  const valeur = piocher(LISTES[id], idee[id]);
+  const valeur = tirer(id);
   await animeSlot(id, valeur, REDUIT ? 0 : 480);
   idee[id] = valeur;
+  retenir(id, valeur);
   enCours = false;
 }
 
@@ -340,6 +397,7 @@ async function relancer(id){
 function imposer(id, valeur, btn){
   if (enCours || idee[id] === valeur) return;
   idee[id] = valeur;
+  retenir(id, valeur);
   const valEl  = document.querySelector(`[data-valeur="${id}"]`);
   const slotEl = valEl.closest(".slot");
   valEl.textContent = valeur;
@@ -370,7 +428,7 @@ function construitListes(){
     const chips = g.querySelector(".chips");
     items.forEach(it => {
       const b = document.createElement("button");
-      b.type = "button"; b.className = "chip"; b.textContent = it;
+      b.type = "button"; b.className = "chip"; b.textContent = it; b.dataset.cat = cat.id;
       b.addEventListener("click", () => imposer(cat.id, it, b));
       chips.appendChild(b);
     });
@@ -419,6 +477,7 @@ window.addEventListener("keydown", e => {
 
 construitSlots();
 construitListes();
+majRecents();
 construitTicker();
 nouvelleIdee();   // une idée dès l'ouverture de la page
 </script>
